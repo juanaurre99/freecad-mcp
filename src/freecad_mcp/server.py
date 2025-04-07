@@ -196,6 +196,49 @@ def create_object(
             "obj_type": "Draft::Circle",
         }
         ```
+        If you want to create a loft between profiles, you can use the following data:
+        ```json
+        {
+            "doc_name": "MyLoft",
+            "obj_name": "Loft",
+            "obj_type": "Part::Loft",
+            "obj_properties": {
+                "Sections": ["Circle1", "Circle2"],
+                "Solid": true,
+                "Ruled": true
+            }
+        }
+        ```
+
+        If you want to create a revolve object from a profile, you can use the following data:
+        ```json
+        {
+            "doc_name": "MyRevolve",
+            "obj_name": "Revolve",
+            "obj_type": "Part::Revolution",
+            "obj_properties": {
+                "Source": "Circle1",
+                "Angle": 360.0,
+                "Solid": true,
+                "Axis": {"x": 0.0, "y": 1.0, "z": 0.0},
+                "Base": {"x": 0.0, "y": 0.0, "z": 0.0}
+            }
+        }
+        ```
+
+        If you want to create a sweep object, you can use the following data:
+        ```json
+        {
+            "doc_name": "MySweep",
+            "obj_name": "Sweep",
+            "obj_type": "Part::Sweep",
+            "obj_properties": {
+                "Sections": ["Circle1"],
+                "Spine": "Path1",
+                "Solid": true,
+                "Frenet": true
+            }
+        }
 
         If you want to create a FEM analysis, you can use the following data.
         ```json
