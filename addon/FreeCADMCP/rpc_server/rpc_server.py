@@ -1,15 +1,9 @@
 import FreeCAD
 import FreeCADGui
-import ObjectsFem
 
-import contextlib
 import queue
-import base64
-import io
-import os
-import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from xmlrpc.server import SimpleXMLRPCServer
 
@@ -38,24 +32,20 @@ def process_gui_tasks():
 @dataclass
 class Object:
     name: str
-    type: str | None = None
-    analysis: str | None = None
-    properties: dict[str, Any] = field(default_factory=dict)
+    type: str
+    properties: dict[str, Any]
 
 
 def set_object_property(
     doc: FreeCAD.Document, obj: FreeCAD.DocumentObject, properties: dict[str, Any]
-):
-    for prop, val in properties.items():
-        try:
-            if prop in obj.PropertiesList:
+):  
+    FreeCAD.Console.PrintMessage("=== START set_object_property ===\n")
+    for prop in obj.PropertiesList:
+        if prop in properties:
+            val = properties[prop]
+            try:
                 if prop == "Placement" and isinstance(val, dict):
-                    if "Base" in val:
-                        pos = val["Base"]
-                    elif "Position" in val:
-                        pos = val["Position"]
-                    else:
-                        pos = {}
+                    pos = val.get("Position", {})
                     rot = val.get("Rotation", {})
                     placement = FreeCAD.Placement(
                         FreeCAD.Vector(
@@ -90,35 +80,31 @@ def set_object_property(
                         setattr(obj, prop, ref_obj)
                     else:
                         raise ValueError(f"Referenced object '{val}' not found.")
-
-                elif prop == "References" and isinstance(val, list):
-                    refs = []
-                    for ref_name, face in val:
-                        ref_obj = doc.getObject(ref_name)
-                        if ref_obj:
-                            refs.append((ref_obj, face))
+                
+                elif prop == "Sections" and isinstance(val, list):
+                    FreeCAD.Console.PrintMessage(f"=== HANDLING SECTIONS: {val} ===\n")
+                    sections = []
+                    for section_name in val:
+                        section_obj = doc.getObject(section_name)
+                        if section_obj:
+                            sections.append(section_obj)
                         else:
-                            raise ValueError(f"Referenced object '{ref_name}' not found.")
-                    setattr(obj, prop, refs)
-
+                            raise ValueError(f"Referenced section object '{section_name}' not found.")
+                    setattr(obj, prop, sections)
+                
+                elif prop == "Spine" and isinstance(val, str):
+                    FreeCAD.Console.PrintMessage(f"=== HANDLING SPINE: {val} ===\n")
+                    spine_obj = doc.getObject(val)
+                    if spine_obj:
+                        FreeCAD.Console.PrintMessage(f"Found spine object: {spine_obj}\n")
+                        setattr(obj, prop, spine_obj)
+                    else:
+                        raise ValueError(f"Referenced spine object '{val}' not found.")
+                
                 else:
                     setattr(obj, prop, val)
-            # ShapeColor is a property of the ViewObject
-            elif prop == "ShapeColor" and isinstance(val, (list, tuple)):
-                setattr(obj.ViewObject, prop, (float(val[0]), float(val[1]), float(val[2]), float(val[3])))
-
-            elif prop == "ViewObject" and isinstance(val, dict):
-                for k, v in val.items():
-                    if k == "ShapeColor":
-                        setattr(obj.ViewObject, k, (float(v[0]), float(v[1]), float(v[2]), float(v[3])))
-                    else:
-                        setattr(obj.ViewObject, k, v)
-
-            else:
-                setattr(obj, prop, val)
-
-        except Exception as e:
-            FreeCAD.Console.PrintError(f"Property '{prop}' assignment error: {e}\n")
+            except Exception as e:
+                FreeCAD.Console.PrintError(f"Property '{prop}' assignment error: {e}\n")
 
 
 class FreeCADRPC:
@@ -139,7 +125,6 @@ class FreeCADRPC:
         obj = Object(
             name=obj_data.get("Name", "New_Object"),
             type=obj_data["Type"],
-            analysis=obj_data.get("Analysis", None),
             properties=obj_data.get("Properties", {}),
         )
         rpc_request_queue.put(lambda: self._create_object_gui(doc_name, obj))
@@ -152,6 +137,7 @@ class FreeCADRPC:
     def edit_object(self, doc_name: str, obj_name: str, properties: dict[str, Any]) -> dict[str, Any]:
         obj = Object(
             name=obj_name,
+            type=properties["Type"],
             properties=properties.get("Properties", {}),
         )
         rpc_request_queue.put(lambda: self._edit_object_gui(doc_name, obj))
@@ -165,16 +151,14 @@ class FreeCADRPC:
         rpc_request_queue.put(lambda: self._delete_object_gui(doc_name, obj_name))
         res = rpc_response_queue.get()
         if res is True:
-            return {"success": True, "object_name": obj_name}
+            return {"success": True, "message": "Object deleted successfully."}
         else:
             return {"success": False, "error": res}
 
     def execute_code(self, code: str) -> dict[str, Any]:
-        output_buffer = io.StringIO()
         def task():
             try:
-                with contextlib.redirect_stdout(output_buffer):
-                    exec(code, globals())
+                exec(code, globals())
                 FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
                 return True
             except Exception as e:
@@ -186,10 +170,7 @@ class FreeCADRPC:
         rpc_request_queue.put(task)
         res = rpc_response_queue.get()
         if res is True:
-            return {
-                "success": True,
-                "message": "Python code execution scheduled. \nOutput: " + output_buffer.getvalue()
-            }
+            return {"success": True, "message": "Python code execution scheduled."}
         else:
             return {"success": False, "error": res}
 
@@ -221,18 +202,6 @@ class FreeCADRPC:
     def get_parts_list(self):
         return get_parts_list()
 
-    def get_active_screenshot(self, view_name: str = "Isometric") -> str:
-        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        rpc_request_queue.put(lambda: self._save_active_screenshot(temp_file.name, view_name))
-        res = rpc_response_queue.get()
-        if res is True:
-            with open(temp_file.name, "rb") as image_file:
-                image_bytes = image_file.read()
-                os.remove(temp_file.name)
-                return base64.b64encode(image_bytes).decode("utf-8")
-        else:
-            return None
-
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)
         doc.recompute()
@@ -243,56 +212,12 @@ class FreeCADRPC:
         doc = FreeCAD.getDocument(doc_name)
         if doc:
             try:
-                if obj.type == "Fem::FemMeshGmsh" and obj.analysis:
-                    from femmesh.gmshtools import GmshTools
-                    res = getattr(doc, obj.analysis).addObject(ObjectsFem.makeMeshGmsh(doc, obj.name))[0]
-                    if "Part" in obj.properties:
-                        target_obj = doc.getObject(obj.properties["Part"])
-                        if target_obj:
-                            res.Part = target_obj
-                        else:
-                            raise ValueError(f"Referenced object '{obj.properties['Part']}' not found.")
-                        del obj.properties["Part"]
-                    else:
-                        raise ValueError("'Part' property not found in properties.")
-
-                    for param, value in obj.properties.items():
-                        if hasattr(res, param):
-                            setattr(res, param, value)
-                    doc.recompute()
-
-                    gmsh_tools = GmshTools(res)
-                    gmsh_tools.create_mesh()
-                    FreeCAD.Console.PrintMessage(
-                        f"FEM Mesh '{res.Name}' generated successfully in '{doc_name}'.\n"
-                    )
-                elif obj.type.startswith("Fem::"):
-                    fem_make_methods = {
-                        "MaterialCommon": ObjectsFem.makeMaterialSolid,
-                        "AnalysisPython": ObjectsFem.makeAnalysis,
-                    }
-                    obj_type_short = obj.type.split("::")[1]
-                    method_name = "make" + obj_type_short
-                    make_method = fem_make_methods.get(obj_type_short, getattr(ObjectsFem, method_name, None))
-
-                    if callable(make_method):
-                        res = make_method(doc, obj.name)
-                        set_object_property(doc, res, obj.properties)
-                        FreeCAD.Console.PrintMessage(
-                            f"FEM object '{res.Name}' created with '{method_name}'.\n"
-                        )
-                    else:
-                        raise ValueError(f"No creation method '{method_name}' found in ObjectsFem.")
-                    if obj.type != "Fem::AnalysisPython" and obj.analysis:
-                        getattr(doc, obj.analysis).addObject(res)
-                else:
-                    res = doc.addObject(obj.type, obj.name)
-                    set_object_property(doc, res, obj.properties)
-                    FreeCAD.Console.PrintMessage(
-                        f"{res.TypeId} '{res.Name}' added to '{doc_name}' via RPC.\n"
-                    )
- 
+                res = doc.addObject(obj.type, obj.name)
+                set_object_property(doc, res, obj.properties)
                 doc.recompute()
+                FreeCAD.Console.PrintMessage(
+                    f"{res.TypeId} '{res.Name}' added to '{doc_name}' via RPC.\n"
+                )
                 return True
             except Exception as e:
                 return str(e)
@@ -312,21 +237,6 @@ class FreeCADRPC:
             return f"Object '{obj.name}' not found in document '{doc_name}'.\n"
 
         try:
-            # For Fem::ConstraintFixed
-            if hasattr(obj_ins, "References") and "References" in obj.properties:
-                refs = []
-                for ref_name, face in obj.properties["References"]:
-                    ref_obj = doc.getObject(ref_name)
-                    if ref_obj:
-                        refs.append((ref_obj, face))
-                    else:
-                        raise ValueError(f"Referenced object '{ref_name}' not found.")
-                obj_ins.References = refs
-                FreeCAD.Console.PrintMessage(
-                    f"References updated for '{obj.name}' in '{doc_name}'.\n"
-                )
-                # delete References from properties
-                del obj.properties["References"]
             set_object_property(doc, obj_ins, obj.properties)
             doc.recompute()
             FreeCAD.Console.PrintMessage(f"Object '{obj.name}' updated via RPC.\n")
@@ -340,46 +250,14 @@ class FreeCADRPC:
             FreeCAD.Console.PrintError(f"Document '{doc_name}' not found.\n")
             return f"Document '{doc_name}' not found.\n"
 
-        try:
-            doc.removeObject(obj_name)
-            doc.recompute()
-            FreeCAD.Console.PrintMessage(f"Object '{obj_name}' deleted via RPC.\n")
-            return True
-        except Exception as e:
-            return str(e)
+        doc.removeObject(obj_name)
+        doc.recompute()
+        FreeCAD.Console.PrintMessage(f"Object '{obj_name}' deleted via RPC.\n")
+        return True
 
     def _insert_part_from_library(self, relative_path):
         try:
             insert_part_from_library(relative_path)
-            return True
-        except Exception as e:
-            return str(e)
-
-    def _save_active_screenshot(self, save_path: str, view_name: str = "Isometric"):
-        try:
-            view = FreeCADGui.ActiveDocument.ActiveView
-            if view_name == "Isometric":
-                view.viewIsometric()
-            elif view_name == "Front":
-                view.viewFront()
-            elif view_name == "Top":
-                view.viewTop()
-            elif view_name == "Right":
-                view.viewRight()
-            elif view_name == "Back":
-                view.viewBack()
-            elif view_name == "Left":
-                view.viewLeft()
-            elif view_name == "Bottom":
-                view.viewBottom()
-            elif view_name == "Dimetric":
-                view.viewDimetric()
-            elif view_name == "Trimetric":
-                view.viewTrimetric()
-            else:
-                raise ValueError(f"Invalid view name: {view_name}")
-            view.fitAll()
-            view.saveImage(save_path, 1)
             return True
         except Exception as e:
             return str(e)
@@ -398,12 +276,14 @@ def start_rpc_server(host="localhost", port=9875):
 
     def server_loop():
         FreeCAD.Console.PrintMessage(f"RPC Server started at {host}:{port}\n")
+        FreeCAD.Console.PrintMessage("=== START server_loop ===\n")
         rpc_server_instance.serve_forever()
 
     rpc_server_thread = threading.Thread(target=server_loop, daemon=True)
     rpc_server_thread.start()
 
     QTimer.singleShot(500, process_gui_tasks)
+    FreeCAD.Console.PrintMessage("=== END start_rpc_server ===\n")
 
     return f"RPC Server started at {host}:{port}."
 
